@@ -1,10 +1,13 @@
-use std::path::Path;
+mod repo;
+
+use std::sync::mpsc::TryRecvError;
 
 use eframe::{
     App,
     egui::{self, ThemePreference, Widget},
 };
-use git2::{ObjectType, Repository, StatusOptions};
+
+use crate::repo::{Command, Repo, open_repository};
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -22,95 +25,84 @@ fn main() -> eframe::Result<()> {
     )
 }
 
-fn new_app() -> MyApp {
-    let repo = Repository::open("./").expect("Cannot open repository");
+fn new_app() -> Lunatig {
+    let repo_2 = open_repository("./");
+    repo_2.command_tx.send(Command::GetStatuses).unwrap();
 
-    println!("head is branch: {}", repo.head().unwrap().is_branch());
-    println!("head detached: {}", repo.head_detached().unwrap());
-
-    MyApp {
-        repo,
+    Lunatig {
         commit_message: String::new(),
         commit_ammend: false,
+        repo_2,
     }
 }
 
-struct MyApp {
-    repo: Repository,
+struct Lunatig {
     commit_message: String,
     commit_ammend: bool,
+    repo_2: Repo,
 }
-impl App for MyApp {
+impl App for Lunatig {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        
+        loop {
+            let event = match self.repo_2.event_rx.try_recv() {
+                Ok(e) => e,
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    panic!("Channel disconnected");
+                }
+            };
+
+            match event {
+                repo::Event::UnstagedFiles(unstaged_files) => {
+                    self.repo_2.unstaged_files = unstaged_files;
+                }
+                repo::Event::StagedFiles(staged_files) => {
+                    self.repo_2.staged_files = staged_files;
+                }
+            }
+        }
+
         egui::CentralPanel::default().show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
-                
                 ui.heading("Unstaged:");
-                let statuses = self
-                    .repo
-                    .statuses(Some(
-                        &mut StatusOptions::new()
-                            .show(git2::StatusShow::Workdir)
-                            .include_ignored(false)
-                            .include_untracked(true)
-                            .recurse_untracked_dirs(true),
-                    ))
-                    .unwrap();
-                for status in statuses.iter() {
+                for status in self.repo_2.unstaged_files.iter() {
                     ui.horizontal(|ui| {
                         if ui.button("stage").clicked() {
-                            let mut index = self.repo.index().unwrap();
-                            index.add_path(Path::new(status.path().unwrap())).unwrap();
-                            index.write().unwrap();
+                            self.repo_2
+                                .command_tx
+                                .send(Command::StageFile {
+                                    path: status.path.clone(),
+                                })
+                                .unwrap();
                         }
-                        if status.status().is_wt_new() {
-                            ui.monospace("NEW");
-                        }
-                        if status.status().is_wt_modified() {
-                            ui.monospace("MOD");
-                        }
-                        if status.status().is_wt_deleted() {
-                            ui.monospace("DEL");
-                        }
-                        if status.status().is_wt_typechange() {
-                            ui.monospace("TYP");
-                        }
-                        ui.label(status.path().unwrap());
+                        match status.status_type {
+                            repo::FileStatusStatus::New => ui.monospace("NEW"),
+                            repo::FileStatusStatus::Modified => ui.monospace("MOD"),
+                            repo::FileStatusStatus::Deleted => ui.monospace("DEL"),
+                            repo::FileStatusStatus::TypeChanged => ui.monospace("TYP"),
+                        };
+                        ui.label(&status.path);
                     });
                 }
                 ui.separator();
                 ui.heading("Staged:");
-                let statuses = self
-                    .repo
-                    .statuses(Some(
-                        &mut StatusOptions::new()
-                            .show(git2::StatusShow::Index)
-                            .include_ignored(false)
-                            .include_untracked(true),
-                    ))
-                    .unwrap();
-                for status in statuses.iter() {
+                for status in self.repo_2.staged_files.iter() {
                     ui.horizontal(|ui| {
                         if ui.button("unstage").clicked() {
-                            let head = self.repo.head().unwrap().peel(ObjectType::Commit).unwrap();
-                            self.repo
-                                .reset_default(Some(&head), [Path::new(status.path().unwrap())])
+                            self.repo_2
+                                .command_tx
+                                .send(Command::ResetStagedFile {
+                                    path: status.path.clone(),
+                                })
                                 .unwrap();
                         }
-                        if status.status().is_index_new() {
-                            ui.monospace("NEW");
-                        }
-                        if status.status().is_index_modified() {
-                            ui.monospace("MOD");
-                        }
-                        if status.status().is_index_deleted() {
-                            ui.monospace("DEL");
-                        }
-                        if status.status().is_index_typechange() {
-                            ui.monospace("TYP");
-                        }
-                        ui.label(status.path().unwrap());
+                        match status.status_type {
+                            repo::FileStatusStatus::New => ui.monospace("NEW"),
+                            repo::FileStatusStatus::Modified => ui.monospace("MOD"),
+                            repo::FileStatusStatus::Deleted => ui.monospace("DEL"),
+                            repo::FileStatusStatus::TypeChanged => ui.monospace("TYP"),
+                        };
+                        ui.label(&status.path);
                     });
                 }
                 ui.separator();
@@ -125,22 +117,12 @@ impl App for MyApp {
                     },
                     |ui| {
                         if ui.button("commit").clicked() {
-                            let mut index = self.repo.index().unwrap();
-                            let tree_oid = index.write_tree().unwrap();
-                            let tree = self.repo.find_tree(tree_oid).unwrap();
-
-                            let head = self.repo.head().unwrap();
-                            let parent_commit = head.peel_to_commit().unwrap();
-
-                            let commit_oid = self.repo.commit(
-                                Some("HEAD"),
-                                &self.repo.signature().unwrap(),
-                                &self.repo.signature().unwrap(),
-                                &self.commit_message,
-                                &tree,
-                                &[&parent_commit],
-                            ).unwrap();
-                            println!("Created commit: {:?}", commit_oid);
+                            self.repo_2
+                                .command_tx
+                                .send(Command::Commit {
+                                    message: self.commit_message.clone(),
+                                })
+                                .unwrap();
                         }
                     },
                 )
