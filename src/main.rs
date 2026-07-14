@@ -6,10 +6,29 @@ use eframe::{
     App,
     egui::{self, ThemePreference, Widget},
 };
+use tracing_subscriber::EnvFilter;
 
 use crate::repo::{Command, Repo, open_repository};
 
 fn main() -> eframe::Result<()> {
+    // 1. Start with your hardcoded, baseline rules
+    let mut filter = EnvFilter::new("warn")
+        .add_directive("wgpu_hal=error".parse().unwrap())
+        .add_directive("egui_wgpu=error".parse().unwrap())
+        .add_directive("lunatig=debug".parse().unwrap());
+
+    // 2. If RUST_LOG is set, merge its directives *on top* of the baseline
+    if let Ok(rust_log) = std::env::var("RUST_LOG") {
+        for directive in rust_log.split(',') {
+            match directive.parse() {
+                Ok(parsed) => filter = filter.add_directive(parsed),
+                Err(e) => eprintln!("Could not parse logging directive: '{directive}', error: {e}"),
+            }
+        }
+    }
+
+    tracing_subscriber::fmt().with_env_filter(filter).init();
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([640.0, 480.0]),
         ..Default::default()

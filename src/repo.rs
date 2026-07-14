@@ -2,9 +2,11 @@ use std::{
     path::Path,
     sync::mpsc::{self, Receiver, Sender},
     thread::{self, JoinHandle},
+    time::Instant,
 };
 
 use git2::{ObjectType, Oid, Repository, StatusOptions};
+use tracing::{debug, error, info, warn};
 
 pub struct Repo {
     pub unstaged_files: Vec<FileStatus>,
@@ -78,6 +80,7 @@ impl Backend {
                 panic!("Cannot open repository at {repo_path}, error: {e}");
             }
         };
+        info!("Opened repository at {repo_path}");
         Backend {
             repo_path,
             command_rx,
@@ -90,18 +93,19 @@ impl Backend {
             let command = match self.command_rx.recv() {
                 Ok(c) => c,
                 Err(e) => {
-                    eprintln!("Command channel closed, error: {e}");
+                    error!("Command channel closed, error: {e}");
                     break;
                 }
             };
             match command {
                 Command::Close => {
-                    println!("Close backend for {}", self.repo_path);
+                    info!("Close backend for {}", self.repo_path);
                     break;
                 }
                 Command::GetStatuses => {
-                    println!("Refreshing statuses");
+                    info!("Refreshing statuses for work tree and index");
                     self.send_statuses().unwrap();
+                    info!("Refresh done");
                 }
                 Command::StageFile { path } => {
                     let mut index = self.repo.index().unwrap();
@@ -121,7 +125,7 @@ impl Backend {
                 }
                 Command::Commit { message } => {
                     let commit_oid = self.commit(&message).unwrap();
-                    println!("Created commit: {:?}", commit_oid);
+                    info!("Created commit: {:?}", commit_oid);
 
                     self.send_statuses().unwrap();
                 }
@@ -136,6 +140,7 @@ impl Backend {
     }
 
     fn send_unstaged_statuses(&mut self) -> anyhow::Result<()> {
+        let t1 = Instant::now();
         let unstaged_statuses = self.repo.statuses(Some(
             StatusOptions::new()
                 .show(git2::StatusShow::Workdir)
@@ -145,26 +150,30 @@ impl Backend {
         ))?;
         let mut unstaged_files = Vec::new();
         for file in unstaged_statuses.iter() {
+            let path = file.path().unwrap().to_owned();
             let status_type = match file.status() {
                 s if s.is_wt_deleted() => FileStatusStatus::Deleted,
                 s if s.is_wt_new() => FileStatusStatus::New,
                 s if s.is_wt_modified() => FileStatusStatus::Modified,
                 s if s.is_wt_typechange() => FileStatusStatus::TypeChanged,
                 s => {
-                    println!("unknown status: {:?}", s);
+                    warn!("unknown status in worktree file {}: {:?}", &path, s);
                     break;
                 }
             };
-            unstaged_files.push(FileStatus {
-                path: file.path().unwrap().to_owned(),
-                status_type,
-            })
+            unstaged_files.push(FileStatus { path, status_type })
         }
         self.event_tx.send(Event::UnstagedFiles(unstaged_files))?;
+
+        debug!(
+            "Refreshing worktree statuses took: {} ms",
+            Instant::now().duration_since(t1).as_millis()
+        );
         Ok(())
     }
 
     fn send_staged_statuses(&mut self) -> anyhow::Result<()> {
+        let t1 = Instant::now();
         let staged_statuses = self.repo.statuses(Some(
             StatusOptions::new()
                 .show(git2::StatusShow::Index)
@@ -174,22 +183,25 @@ impl Backend {
         ))?;
         let mut staged_files = Vec::new();
         for file in staged_statuses.iter() {
+            let path = file.path().unwrap().to_owned();
             let status_type = match file.status() {
                 s if s.is_index_deleted() => FileStatusStatus::Deleted,
                 s if s.is_index_new() => FileStatusStatus::New,
                 s if s.is_index_modified() => FileStatusStatus::Modified,
                 s if s.is_index_typechange() => FileStatusStatus::TypeChanged,
                 s => {
+                    warn!("unknown status in index file {}: {:?}", &path, s);
                     println!("unknown status: {:?}", s);
                     break;
                 }
             };
-            staged_files.push(FileStatus {
-                path: file.path().unwrap().to_owned(),
-                status_type,
-            })
+            staged_files.push(FileStatus { path, status_type })
         }
         self.event_tx.send(Event::StagedFiles(staged_files))?;
+        debug!(
+            "Refreshing index statuses took: {} ms",
+            Instant::now().duration_since(t1).as_millis()
+        );
         Ok(())
     }
 
