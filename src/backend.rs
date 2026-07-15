@@ -26,18 +26,11 @@ pub enum Event {
 }
 
 pub enum Command {
-    #[allow(unused)]
     Close,
     GetStatuses,
-    StageFile {
-        path: String,
-    },
-    ResetStagedFile {
-        path: String,
-    },
-    Commit {
-        message: String,
-    },
+    StageFile { path: String },
+    ResetStagedFile { path: String },
+    Commit { message: String },
 }
 
 pub fn start_backend(
@@ -55,6 +48,7 @@ struct Backend {
     command_rx: Receiver<Command>,
     event_tx: Sender<Event>,
     repo: Repository,
+    running: bool,
 }
 impl Backend {
     fn new(repo_path: String, command_rx: Receiver<Command>, event_tx: Sender<Event>) -> Self {
@@ -70,51 +64,57 @@ impl Backend {
             command_rx,
             event_tx,
             repo,
+            running: true,
         }
     }
     fn run(mut self) {
-        loop {
-            let command = match self.command_rx.recv() {
-                Ok(c) => c,
-                Err(e) => {
-                    error!("Command channel closed, error: {e}");
-                    break;
-                }
-            };
-            match command {
-                Command::Close => {
-                    info!("Close backend for {}", self.repo_path);
-                    break;
-                }
-                Command::GetStatuses => {
-                    info!("Refreshing statuses for work tree and index");
-                    self.send_statuses().unwrap();
-                    info!("Refresh done");
-                }
-                Command::StageFile { path } => {
-                    let mut index = self.repo.index().unwrap();
-                    index.add_path(Path::new(&path)).unwrap();
-                    index.write().unwrap();
-
-                    self.send_statuses().unwrap();
-                }
-                Command::ResetStagedFile { path } => {
-                    {
-                        let head = self.repo.head().unwrap().peel(ObjectType::Commit).unwrap();
-                        self.repo
-                            .reset_default(Some(&head), [Path::new(&path)])
-                            .unwrap();
-                    }
-                    self.send_statuses().unwrap();
-                }
-                Command::Commit { message } => {
-                    let commit_oid = self.commit(&message).unwrap();
-                    info!("Created commit: {:?}", commit_oid);
-
-                    self.send_statuses().unwrap();
-                }
+        while self.running {
+            if let Err(e) = self.process_command() {
+                error!("{e}");
             }
         }
+    }
+    fn process_command(&mut self) -> anyhow::Result<()> {
+        let command = match self.command_rx.recv() {
+            Ok(c) => c,
+            Err(e) => {
+                error!("Command channel closed, error: {e}. Stopping backend");
+                self.running = false;
+                return Ok(());
+            }
+        };
+        match command {
+            Command::Close => {
+                info!("Close backend for {}", self.repo_path);
+                self.running = false;
+            }
+            Command::GetStatuses => {
+                info!("Refreshing statuses for work tree and index");
+                self.send_statuses()?;
+                info!("Refresh done");
+            }
+            Command::StageFile { path } => {
+                let mut index = self.repo.index()?;
+                index.add_path(Path::new(&path))?;
+                index.write()?;
+
+                self.send_statuses()?;
+            }
+            Command::ResetStagedFile { path } => {
+                {
+                    let head = self.repo.head()?.peel(ObjectType::Commit)?;
+                    self.repo.reset_default(Some(&head), [Path::new(&path)])?;
+                }
+                self.send_statuses()?;
+            }
+            Command::Commit { message } => {
+                let commit_oid = self.commit(&message)?;
+                info!("Created commit: {:?}", commit_oid);
+
+                self.send_statuses()?;
+            }
+        }
+        Ok(())
     }
 
     fn send_statuses(&mut self) -> anyhow::Result<()> {
@@ -134,7 +134,7 @@ impl Backend {
         ))?;
         let mut unstaged_files = Vec::new();
         for file in unstaged_statuses.iter() {
-            let path = file.path().unwrap().to_owned();
+            let path = file.path()?.to_owned();
             let status_type = match file.status() {
                 s if s.is_wt_deleted() => FileStatusStatus::Deleted,
                 s if s.is_wt_new() => FileStatusStatus::New,
@@ -167,7 +167,7 @@ impl Backend {
         ))?;
         let mut staged_files = Vec::new();
         for file in staged_statuses.iter() {
-            let path = file.path().unwrap().to_owned();
+            let path = file.path()?.to_owned();
             let status_type = match file.status() {
                 s if s.is_index_deleted() => FileStatusStatus::Deleted,
                 s if s.is_index_new() => FileStatusStatus::New,
@@ -199,8 +199,8 @@ impl Backend {
 
         let commit_oid = self.repo.commit(
             Some("HEAD"),
-            &self.repo.signature().unwrap(),
-            &self.repo.signature().unwrap(),
+            &self.repo.signature()?,
+            &self.repo.signature()?,
             &message,
             &tree,
             &[&parent_commit],

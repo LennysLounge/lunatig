@@ -65,7 +65,7 @@ fn open_repository(path: &str) -> Repo {
     Repo {
         unstaged_files: Vec::new(),
         staged_files: Vec::new(),
-        backend: Some(backend_thread),
+        backend_handle: Some(backend_thread),
         command_tx,
         event_rx,
         commit_message: String::new(),
@@ -76,8 +76,7 @@ fn open_repository(path: &str) -> Repo {
 struct Repo {
     unstaged_files: Vec<FileStatus>,
     staged_files: Vec<FileStatus>,
-    #[allow(unused)]
-    backend: Option<JoinHandle<()>>,
+    backend_handle: Option<JoinHandle<()>>,
     command_tx: Sender<Command>,
     event_rx: Receiver<Event>,
     commit_message: String,
@@ -90,14 +89,23 @@ impl Repo {
             error!("Error sending command: {e}");
         }
     }
-    fn receive_event(&self) -> Option<Event> {
+    fn receive_event(&mut self) -> Option<Event> {
         match self.event_rx.try_recv() {
             Ok(e) => Some(e),
             Err(TryRecvError::Empty) => None,
             Err(e) => {
-                error!("Error receiving event: {e}");
+                error!("Error receiving event, error: {e}. Close backend");
+                self.send_command(Command::Close);
+                self.backend_handle = None;
                 None
             }
+        }
+    }
+    fn is_backend_alive(&self) -> bool {
+        if let Some(handle) = &self.backend_handle {
+            !handle.is_finished()
+        } else {
+            false
         }
     }
 }
@@ -107,19 +115,28 @@ struct Lunatig {
 }
 impl App for Lunatig {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        while let Some(event) = self.repo.receive_event() {
-            match event {
-                Event::UnstagedFiles(unstaged_files) => {
-                    self.repo.unstaged_files = unstaged_files;
-                }
-                Event::StagedFiles(staged_files) => {
-                    self.repo.staged_files = staged_files;
+        if self.repo.is_backend_alive() {
+            while let Some(event) = self.repo.receive_event() {
+                match event {
+                    Event::UnstagedFiles(unstaged_files) => {
+                        self.repo.unstaged_files = unstaged_files;
+                    }
+                    Event::StagedFiles(staged_files) => {
+                        self.repo.staged_files = staged_files;
+                    }
                 }
             }
         }
 
         egui::CentralPanel::default().show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
+                if !self.repo.is_backend_alive() {
+                    ui.horizontal(|ui| {
+                        ui.centered_and_justified(|ui| {
+                            ui.label("Backend offline");
+                        });
+                    });
+                }
                 ui.heading("Unstaged:");
                 for status in self.repo.unstaged_files.iter() {
                     ui.horizontal(|ui| {
