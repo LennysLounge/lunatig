@@ -1,14 +1,20 @@
-mod repo;
+mod backend;
 
 use std::sync::mpsc::TryRecvError;
 
 use eframe::{
     App,
-    egui::{self, ThemePreference, Widget},
+    egui::{self, Layout, ThemePreference, Widget},
 };
+use tracing::error;
 use tracing_subscriber::EnvFilter;
 
-use crate::repo::{Command, Repo, open_repository};
+use std::{
+    sync::mpsc::{self, Receiver, Sender},
+    thread::JoinHandle,
+};
+
+use crate::backend::{Command, Event, FileStatus, FileStatusStatus};
 
 fn main() -> eframe::Result<()> {
     // 1. Start with your hardcoded, baseline rules
@@ -45,38 +51,69 @@ fn main() -> eframe::Result<()> {
 }
 
 fn new_app() -> Lunatig {
-    let repo_2 = open_repository("./");
-    repo_2.command_tx.send(Command::GetStatuses).unwrap();
+    let repo = open_repository("./");
+    repo.command_tx.send(Command::GetStatuses).unwrap();
 
-    Lunatig {
+    Lunatig { repo }
+}
+
+fn open_repository(path: &str) -> Repo {
+    let (command_tx, command_rx) = mpsc::channel::<Command>();
+    let (event_tx, event_rx) = mpsc::channel::<Event>();
+    let repo_path = path.to_owned();
+    let backend_thread = backend::start_backend(repo_path, command_rx, event_tx);
+    Repo {
+        unstaged_files: Vec::new(),
+        staged_files: Vec::new(),
+        backend: Some(backend_thread),
+        command_tx,
+        event_rx,
         commit_message: String::new(),
         commit_ammend: false,
-        repo_2,
+    }
+}
+
+struct Repo {
+    unstaged_files: Vec<FileStatus>,
+    staged_files: Vec<FileStatus>,
+    #[allow(unused)]
+    backend: Option<JoinHandle<()>>,
+    command_tx: Sender<Command>,
+    event_rx: Receiver<Event>,
+    commit_message: String,
+    commit_ammend: bool,
+}
+
+impl Repo {
+    fn send_command(&self, command: Command) {
+        if let Err(e) = self.command_tx.send(command) {
+            error!("Error sending command: {e}");
+        }
+    }
+    fn receive_event(&self) -> Option<Event> {
+        match self.event_rx.try_recv() {
+            Ok(e) => Some(e),
+            Err(TryRecvError::Empty) => None,
+            Err(e) => {
+                error!("Error receiving event: {e}");
+                None
+            }
+        }
     }
 }
 
 struct Lunatig {
-    commit_message: String,
-    commit_ammend: bool,
-    repo_2: Repo,
+    repo: Repo,
 }
 impl App for Lunatig {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        loop {
-            let event = match self.repo_2.event_rx.try_recv() {
-                Ok(e) => e,
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    panic!("Channel disconnected");
-                }
-            };
-
+        while let Some(event) = self.repo.receive_event() {
             match event {
-                repo::Event::UnstagedFiles(unstaged_files) => {
-                    self.repo_2.unstaged_files = unstaged_files;
+                Event::UnstagedFiles(unstaged_files) => {
+                    self.repo.unstaged_files = unstaged_files;
                 }
-                repo::Event::StagedFiles(staged_files) => {
-                    self.repo_2.staged_files = staged_files;
+                Event::StagedFiles(staged_files) => {
+                    self.repo.staged_files = staged_files;
                 }
             }
         }
@@ -84,67 +121,56 @@ impl App for Lunatig {
         egui::CentralPanel::default().show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.heading("Unstaged:");
-                for status in self.repo_2.unstaged_files.iter() {
+                for status in self.repo.unstaged_files.iter() {
                     ui.horizontal(|ui| {
                         if ui.button("stage").clicked() {
-                            self.repo_2
-                                .command_tx
-                                .send(Command::StageFile {
-                                    path: status.path.clone(),
-                                })
-                                .unwrap();
+                            self.repo.send_command(Command::StageFile {
+                                path: status.path.clone(),
+                            });
                         }
                         match status.status_type {
-                            repo::FileStatusStatus::New => ui.monospace("NEW"),
-                            repo::FileStatusStatus::Modified => ui.monospace("MOD"),
-                            repo::FileStatusStatus::Deleted => ui.monospace("DEL"),
-                            repo::FileStatusStatus::TypeChanged => ui.monospace("TYP"),
+                            FileStatusStatus::New => ui.monospace("NEW"),
+                            FileStatusStatus::Modified => ui.monospace("MOD"),
+                            FileStatusStatus::Deleted => ui.monospace("DEL"),
+                            FileStatusStatus::TypeChanged => ui.monospace("TYP"),
                         };
                         ui.label(&status.path);
                     });
                 }
                 ui.separator();
                 ui.heading("Staged:");
-                for status in self.repo_2.staged_files.iter() {
+                for status in self.repo.staged_files.iter() {
                     ui.horizontal(|ui| {
                         if ui.button("unstage").clicked() {
-                            self.repo_2
-                                .command_tx
-                                .send(Command::ResetStagedFile {
-                                    path: status.path.clone(),
-                                })
-                                .unwrap();
+                            self.repo.send_command(Command::ResetStagedFile {
+                                path: status.path.clone(),
+                            });
                         }
                         match status.status_type {
-                            repo::FileStatusStatus::New => ui.monospace("NEW"),
-                            repo::FileStatusStatus::Modified => ui.monospace("MOD"),
-                            repo::FileStatusStatus::Deleted => ui.monospace("DEL"),
-                            repo::FileStatusStatus::TypeChanged => ui.monospace("TYP"),
+                            FileStatusStatus::New => ui.monospace("NEW"),
+                            FileStatusStatus::Modified => ui.monospace("MOD"),
+                            FileStatusStatus::Deleted => ui.monospace("DEL"),
+                            FileStatusStatus::TypeChanged => ui.monospace("TYP"),
                         };
                         ui.label(&status.path);
                     });
                 }
                 ui.separator();
-                egui::text_edit::TextEdit::multiline(&mut self.commit_message)
+                egui::text_edit::TextEdit::multiline(&mut self.repo.commit_message)
                     .desired_width(ui.available_width())
                     .ui(ui);
-                egui::containers::Sides::new().show(
-                    ui,
-                    |ui| {
-                        // todo
-                        ui.checkbox(&mut self.commit_ammend, "ammend");
-                    },
-                    |ui| {
+
+                ui.horizontal(|ui| {
+                    // todo
+                    ui.checkbox(&mut self.repo.commit_ammend, "ammend");
+                    ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button("commit").clicked() {
-                            self.repo_2
-                                .command_tx
-                                .send(Command::Commit {
-                                    message: self.commit_message.clone(),
-                                })
-                                .unwrap();
+                            self.repo.send_command(Command::Commit {
+                                message: self.repo.commit_message.clone(),
+                            });
                         }
-                    },
-                )
+                    });
+                });
             });
         });
     }
