@@ -6,7 +6,9 @@ use std::{
 };
 
 use eyre::Report;
-use git2::{Cred, FetchOptions, ObjectType, Oid, PushOptions, RemoteCallbacks, Repository, StatusOptions};
+use git2::{
+    Cred, FetchOptions, ObjectType, Oid, PushOptions, RemoteCallbacks, Repository, StatusOptions,
+};
 use tracing::{debug, error, info, warn};
 
 pub enum FileStatusStatus {
@@ -171,54 +173,7 @@ impl Backend {
                 info!("Pushed branch to remote");
             }
             Command::Fetch => {
-                let mut remote = self.repo.find_remote("origin")?;
-
-                                let mut callbacks = RemoteCallbacks::new();
-                callbacks.credentials(|_url, username_from_url, _allowed_types| {
-                    Cred::ssh_key_from_agent(username_from_url.unwrap_or("git"))
-                });
-                callbacks.pack_progress(|stage, current, total| {
-                    info!("pack progress state: {stage:?}, current: {current}, total: {total}");
-                });
-                callbacks.push_negotiation(|_| {
-                    info!("pack negotioation");
-                    Ok(())
-                });
-                callbacks.push_transfer_progress(|current, total, bytes| {
-                    info!(
-                        "push transfer progrss current: {current}, total: {total}, bytes: {bytes}"
-                    );
-                });
-                callbacks.sideband_progress(|bytes| {
-                    if let Ok(str) = std::str::from_utf8(bytes) {
-                        info!("sideband progress: {str}");
-                    } else {
-                        info!("sideband progress not utf8");
-                    }
-                    true
-                });
-                callbacks.transfer_progress(|progress| {
-                    info!(
-                        "transfer progres received bytes: {}",
-                        progress.received_bytes()
-                    );
-                    true
-                });
-                callbacks.certificate_check(|_cert, _host| {
-                    info!("certificate check");
-                    Ok(git2::CertificateCheckStatus::CertificateOk)
-                });
-
-                let mut fetch_options = FetchOptions::new();
-                fetch_options.remote_callbacks(callbacks);
-
-                info!("pre fetch");
-                remote.fetch(
-                    &["refs/heads/main:refs/heads/main"],
-                    Some(&mut fetch_options),
-                    Some("fetch")
-                )?;
-                info!("Fetched branches from remote");
+                self.fetch()?;
             }
         }
         Ok(())
@@ -313,5 +268,68 @@ impl Backend {
             &[&parent_commit],
         )?;
         Ok(commit_oid)
+    }
+
+    fn fetch(&mut self) -> Result<(), Report> {
+        let remote_name = "origin";
+        let mut remote = self.repo.find_remote("origin")?;
+
+        let mut refspecs = Vec::new();
+        for (i, refspec) in remote.fetch_refspecs()?.iter().enumerate() {
+            match refspec {
+                Ok(Some(refspec)) => refspecs.push(refspec.to_owned()),
+                Ok(_) => (), // how?
+                Err(_) => {
+                    warn!("Refspec {i} for remote {remote_name} was invalid utf-8 and is ignored",);
+                }
+            }
+        }
+
+        let mut callbacks = RemoteCallbacks::new();
+        callbacks.credentials(|_url, username_from_url, _allowed_types| {
+            Cred::ssh_key_from_agent(username_from_url.unwrap_or("git"))
+        });
+        callbacks.pack_progress(|stage, current, total| {
+            info!("pack progress state: {stage:?}, current: {current}, total: {total}");
+        });
+        callbacks.push_negotiation(|_| {
+            info!("pack negotioation");
+            Ok(())
+        });
+        callbacks.push_transfer_progress(|current, total, bytes| {
+            info!("push transfer progrss current: {current}, total: {total}, bytes: {bytes}");
+        });
+        callbacks.sideband_progress(|bytes| {
+            if let Ok(str) = std::str::from_utf8(bytes) {
+                info!("sideband progress: {str}");
+            } else {
+                info!("sideband progress not utf8");
+            }
+            true
+        });
+        callbacks.transfer_progress(|progress| {
+            info!(
+                "transfer progres received bytes: {}",
+                progress.received_bytes()
+            );
+            true
+        });
+        callbacks.certificate_check(|_cert, _host| {
+            info!("certificate check");
+            Ok(git2::CertificateCheckStatus::CertificateOk)
+        });
+
+        let mut fetch_options = FetchOptions::new();
+        fetch_options.remote_callbacks(callbacks);
+
+        info!("fetching from remote: {remote_name} with refspecs: {refspecs:?}");
+        remote.fetch(&refspecs, Some(&mut fetch_options), Some("fetch"))?;
+
+        // libgit2 wont error if a refspec has a reference that does not exist on the remote
+        // side. To get an error out of it we would have to iterate all known refs of the
+        // remote and see if any of the refspecs matches against it.
+
+        info!("Fetched branches from remote");
+        Ok(())
     }
 }

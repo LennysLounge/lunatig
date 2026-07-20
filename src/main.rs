@@ -6,7 +6,7 @@ use eframe::{
     App,
     egui::{self, Layout, ThemePreference, Widget},
 };
-use tracing::{error, info};
+use tracing::error;
 use tracing_subscriber::EnvFilter;
 
 use std::{
