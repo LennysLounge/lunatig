@@ -6,7 +6,7 @@ use std::{
 };
 
 use eyre::Report;
-use git2::{ObjectType, Oid, Repository, StatusOptions};
+use git2::{Cred, ObjectType, Oid, PushOptions, RemoteCallbacks, Repository, StatusOptions};
 use tracing::{debug, error, info, warn};
 
 pub enum FileStatusStatus {
@@ -33,6 +33,7 @@ pub enum Command {
     StageFile { path: String },
     ResetStagedFile { path: String },
     Commit { message: String },
+    Push,
 }
 
 pub fn start_backend(
@@ -99,8 +100,8 @@ impl Backend {
                 let path = Path::new(path);
                 let mut index = self.repo.index()?;
                 if std::fs::exists(path)? {
-                    index.add_path(Path::new(&path))?;    
-                }else{
+                    index.add_path(Path::new(&path))?;
+                } else {
                     index.remove_path(path)?;
                 }
                 index.write()?;
@@ -119,6 +120,54 @@ impl Backend {
                 info!("Created commit: {:?}", commit_oid);
 
                 self.send_statuses()?;
+            }
+            Command::Push => {
+                let mut remote = self.repo.find_remote("origin")?;
+                let mut callbacks = RemoteCallbacks::new();
+                callbacks.credentials(|_url, username_from_url, _allowed_types| {
+                    Cred::ssh_key_from_agent(username_from_url.unwrap_or("git"))
+                });
+                callbacks.pack_progress(|stage, current, total| {
+                    info!("pack progress state: {stage:?}, current: {current}, total: {total}");
+                });
+                callbacks.push_negotiation(|_| {
+                    info!("pack negotioation");
+                    Ok(())
+                });
+                callbacks.push_transfer_progress(|current, total, bytes| {
+                    info!(
+                        "push transfer progrss current: {current}, total: {total}, bytes: {bytes}"
+                    );
+                });
+                callbacks.sideband_progress(|bytes| {
+                    if let Ok(str) = std::str::from_utf8(bytes) {
+                        info!("sideband progress: {str}");
+                    } else {
+                        info!("sideband progress not utf8");
+                    }
+                    true
+                });
+                callbacks.transfer_progress(|progress| {
+                    info!(
+                        "transfer progres received bytes: {}",
+                        progress.received_bytes()
+                    );
+                    true
+                });
+                callbacks.certificate_check(|_cert, _host| {
+                    info!("certificate check");
+                    Ok(git2::CertificateCheckStatus::CertificateOk)
+                });
+
+                let mut push_options = PushOptions::new();
+                push_options.remote_callbacks(callbacks);
+
+                info!("pre push");
+                remote.push(
+                    &["refs/heads/main:refs/heads/main"],
+                    Some(&mut push_options),
+                )?;
+                info!("Pushed branch to remote");
             }
         }
         Ok(())

@@ -6,7 +6,7 @@ use eframe::{
     App,
     egui::{self, Layout, ThemePreference, Widget},
 };
-use tracing::error;
+use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 use std::{
@@ -136,6 +136,9 @@ impl App for Lunatig {
                             ui.label("Backend offline");
                         });
                     });
+                }
+                if ui.button("push").clicked(){
+                    self.repo.send_command(Command::Push);
                 }
                 ui.heading("Unstaged:");
                 for status in self.repo.unstaged_files.iter() {
