@@ -137,9 +137,14 @@ impl App for Lunatig {
                         });
                     });
                 }
-                if ui.button("push").clicked(){
-                    self.repo.send_command(Command::Push);
-                }
+                ui.horizontal_top(|ui| {
+                    if ui.button("push").clicked() {
+                        self.repo.send_command(Command::Push);
+                    }
+                    if ui.button("fetch").clicked() {
+                        self.repo.send_command(Command::Fetch);
+                    }
+                });
                 ui.heading("Unstaged:");
                 for status in self.repo.unstaged_files.iter() {
                     ui.horizontal(|ui| {
