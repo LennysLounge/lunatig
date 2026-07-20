@@ -96,8 +96,13 @@ impl Backend {
                 info!("Refresh done");
             }
             Command::StageFile { path } => {
+                let path = Path::new(path);
                 let mut index = self.repo.index()?;
-                index.add_path(Path::new(&path))?;
+                if std::fs::exists(path)? {
+                    index.add_path(Path::new(&path))?;    
+                }else{
+                    index.remove_path(path)?;
+                }
                 index.write()?;
 
                 self.send_statuses()?;
