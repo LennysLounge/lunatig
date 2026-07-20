@@ -128,6 +128,10 @@ impl App for Lunatig {
             }
         }
 
+        if ui.input(|i| i.viewport().close_requested()) {
+            self.repo.send_command(Command::Close);
+        }
+
         egui::CentralPanel::default().show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 if !self.repo.is_backend_alive() {
