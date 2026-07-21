@@ -148,6 +148,9 @@ impl App for Lunatig {
                     if ui.button("fetch").clicked() {
                         self.repo.send_command(Command::Fetch);
                     }
+                    if ui.button("pull").clicked() {
+                        self.repo.send_command(Command::Pull);
+                    }
                 });
                 ui.heading("Unstaged:");
                 for status in self.repo.unstaged_files.iter() {

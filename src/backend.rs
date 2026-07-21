@@ -5,9 +5,10 @@ use std::{
     time::Instant,
 };
 
-use eyre::Report;
+use eyre::{Report, eyre};
 use git2::{
     Cred, FetchOptions, ObjectType, Oid, PushOptions, RemoteCallbacks, Repository, StatusOptions,
+    build::CheckoutBuilder,
 };
 use tracing::{debug, error, info, warn};
 
@@ -37,6 +38,7 @@ pub enum Command {
     Commit { message: String },
     Push,
     Fetch,
+    Pull,
 }
 
 pub fn start_backend(
@@ -174,6 +176,38 @@ impl Backend {
             }
             Command::Fetch => {
                 self.fetch()?;
+            }
+            Command::Pull => {
+                info!("starting pull");
+
+                self.fetch()?;
+
+                let mut head = self.repo.head()?;
+                let remote_commit = self.repo.reference_to_annotated_commit(&head)?;
+
+                let (merge_analysis, _merge_preference) =
+                    self.repo.merge_analysis(&[&remote_commit])?;
+                if merge_analysis.is_none() {
+                    return Err(eyre!("No merge possible"));
+                } else if merge_analysis.is_normal() {
+                    return Err(eyre!("Normal merge not implemented"));
+                } else if merge_analysis.is_up_to_date() {
+                    info!("Up to date")
+                } else if merge_analysis.is_fast_forward() {
+                    return Err(eyre!("Unborn merge not implemented"));
+                } else if merge_analysis.is_fast_forward() {
+                    let msg = format!(
+                        "Fast forward branch {} to id: {}",
+                        head.name()?,
+                        remote_commit.id()
+                    );
+                    info!(msg);
+                    head.set_target(remote_commit.id(), &msg)?;
+                    self.repo
+                        .checkout_head(Some(CheckoutBuilder::default().force()))?;
+                }
+
+                info!("pull done");
             }
         }
         Ok(())
